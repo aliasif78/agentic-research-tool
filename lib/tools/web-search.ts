@@ -27,6 +27,7 @@ export const webSearchTool = tool({
           query,
           max_results: 5,
         }),
+        signal: AbortSignal.timeout(10_000), // Tavily hangs -> tool fails at 10s, not never
       });
 
       if (!res.ok) {
