@@ -3,14 +3,14 @@ import { tool } from "ai";
 import { z } from "zod";
 import { generateText } from "ai";
 import { google } from "@ai-sdk/google";
-import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { createSupabaseAdminClient } from "../supabase/admin-client";
 
 export const summarizeNotesTool = (sessionId: string) =>
   tool({
     description: "Retrieve all saved notes for this research session and condense them into a summary.",
     inputSchema: z.object({}),
     execute: async () => {
-      const supabase = await createSupabaseServerClient();
+      const supabase = createSupabaseAdminClient();
       const { data, error } = await supabase.from("research_notes").select("content").eq("session_id", sessionId).order("created_at", { ascending: true });
 
       if (error) {

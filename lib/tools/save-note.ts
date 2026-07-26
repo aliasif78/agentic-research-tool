@@ -1,7 +1,7 @@
 // lib/tools/save-note.ts
 import { tool } from "ai";
 import { z } from "zod";
-import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { createSupabaseAdminClient } from "../supabase/admin-client";
 
 export const saveNoteTool = (sessionId: string) =>
   tool({
@@ -11,7 +11,7 @@ export const saveNoteTool = (sessionId: string) =>
     }),
     execute: async ({ content }) => {
       try {
-        const supabase = await createSupabaseServerClient();
+        const supabase = createSupabaseAdminClient();
         const { data, error } = await supabase.from("research_notes").insert({ session_id: sessionId, content }).select("id").single();
 
         if (error) {
