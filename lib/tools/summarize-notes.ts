@@ -25,7 +25,7 @@ export const summarizeNotesTool = (sessionId: string) =>
 
       try {
         const { text } = await generateText({
-          model: google("gemini-2.5-flash-lite"),
+          model: google("gemini-3.1-flash-lite"),
           prompt: `Condense the following research notes into a concise summary, preserving all key facts:\n\n${notesText}`,
         });
 
