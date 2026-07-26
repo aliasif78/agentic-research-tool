@@ -25,9 +25,14 @@ You have four tools:
 
 Rules:
 - You have a hard limit of ${MAX_STEPS} steps total. Work efficiently.
-- Do not call webSearch more than 2-3 times for the same topic if results aren't adding new information. If searches keep returning nothing new or nothing relevant, call done and say so honestly in your summary — do not keep searching hoping for a different result.
-- If a tool returns { success: false, error }, do not retry the identical call with identical arguments. Either adjust your approach (e.g. reworded search query) or call done and report the limitation.
-- Never fabricate findings. If information isn't in your search results or saved notes, say so in your summary rather than inventing something.`;
+- Do not call webSearch more than 2-3 times for the same topic if results aren't adding new information. If searches keep returning nothing new or nothing relevant, call done and say so.
+- Before retrying a failed webSearch call, check the error message. If it indicates an authorization, configuration, or service-availability problem (e.g. "Unauthorized", "invalid API key", "503", "timed out"), do NOT retry with a reworded query — that class of error is not fixable by changing your input. Call done immediately and report the tool failure.
+
+SOURCE LABELING — this is not optional and applies to every sentence in your final summary:
+- Any claim that came from a successful webSearch result: state it directly, no label needed.
+- Any claim that did NOT come from a successful webSearch result — meaning it comes from your own training data because search failed, returned nothing relevant, or was never called — MUST be prefixed with "[Unverified, from general knowledge, not from search]" on that sentence or bullet point. Do not put a single disclaimer at the top of your summary and then state unlabeled claims below it. Every individual unverified claim needs its own label, immediately before it.
+- If webSearch never returned a successful result anywhere in this run, your summary must not contain any unlabeled substantive claims. Every sentence of content must carry the "[Unverified, from general knowledge, not from search]" label, or you must state plainly that no information could be retrieved and stop there — do not pad the response with unlabeled background knowledge.
+- Never fabricate a webSearch result. If you did not call the tool or it did not succeed, you have no search result to draw from, full stop.`;
 
 export async function POST(req: Request) {
   let body: { topic?: string };
@@ -75,11 +80,18 @@ export async function POST(req: Request) {
         stepLog.push({ step: stepNumber, toolCalls, toolResults, usage });
         // VERIFY: field name is `input` on tool calls in your installed
         // version (v5+ renamed `args` -> `input`; confirm against .d.ts).
-        console.log(`[research:${sessionId}] step ${stepNumber}`, {
-          toolCalls: toolCalls.map((c) => ({ name: c.toolName, input: c.input })),
-          toolResults,
-          usage,
-        });
+        console.log(
+          `[research:${sessionId}] step ${stepNumber}`,
+          JSON.stringify(
+            {
+              toolCalls: toolCalls.map((c) => ({ name: c.toolName, input: c.input })),
+              toolResults,
+              usage,
+            },
+            null,
+            2,
+          ),
+        );
       },
     });
 
@@ -98,35 +110,38 @@ export async function POST(req: Request) {
       { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
     );
 
-    console.log(`[research:${sessionId}] run complete`, {
-      steps: result.steps.length,
-      terminatedByDone: Boolean(doneCall),
-      outerUsage, // NOTE: does not include nested summarizeNotes LLM calls — see below
-    });
+    console.log(
+      `[research:${sessionId}] run complete`,
+      JSON.stringify(
+        {
+          steps: result.steps.length,
+          terminatedByDone: Boolean(doneCall),
+          outerUsage, // NOTE: does not include nested summarizeNotes LLM calls — see below
+        },
+        null,
+        2,
+      ),
+    );
 
     if (doneCall) {
       const { summary } = doneCall.input as { summary: string };
-      return NextResponse.json({
-        sessionId,
-        summary,
-        terminatedByDone: true,
-        steps: result.steps.length,
-        usage: outerUsage,
-      });
+      return NextResponse.json({ sessionId, summary, terminatedByDone: true, steps: result.steps.length, usage: outerUsage });
     }
 
-    // Step ceiling hit without `done` being called. Not a crash, not a
-    // silent hang — this is the exact case Phase 4 test #3 needs to hit.
-    // Deliberately do NOT make one more model call here to "wrap up" —
-    // that would defeat the ceiling you just enforced.
-    return NextResponse.json({
-      sessionId,
-      summary: null,
-      terminatedByDone: false,
-      steps: result.steps.length,
-      usage: outerUsage,
-      warning: `Reached the ${MAX_STEPS}-step limit before the agent called done. No final summary was produced. Partial findings may exist in research_notes for sessionId ${sessionId}.`,
-    });
+    // No `done` call. Two distinct causes — do not conflate them:
+    const hitStepCeiling = result.steps.length >= MAX_STEPS;
+
+    if (!hitStepCeiling) {
+      // Model stopped on its own (plain text finish) without calling `done`,
+      // despite being told it MUST. This is a compliance failure, not a
+      // ceiling event — the message must say so, and result.text (if any)
+      // should be surfaced rather than discarded.
+      console.warn(`[research:${sessionId}] model ended without calling done at step ${result.steps.length}/${MAX_STEPS} — instruction non-compliance, not a ceiling hit.`);
+      return NextResponse.json({ sessionId, summary: result.text || null, terminatedByDone: false, steps: result.steps.length, usage: outerUsage, warning: `The agent ended after ${result.steps.length} of ${MAX_STEPS} steps without calling done. This is a model compliance gap, not the step limit. ${result.text ? "Its final text response is included as summary, but it was not produced via the done tool and has not gone through your source-labeling or termination logic." : "No text response was produced either."}` });
+    }
+
+    // Genuine ceiling hit.
+    return NextResponse.json({ sessionId, summary: null, terminatedByDone: false, steps: result.steps.length, usage: outerUsage, warning: `Reached the ${MAX_STEPS}-step limit before the agent called done. No final summary was produced. Partial findings may exist in research_notes for sessionId ${sessionId}.` });
   } catch (err) {
     console.error(`[research:${sessionId}] run failed`, err);
     return NextResponse.json(
