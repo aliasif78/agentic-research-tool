@@ -2,6 +2,16 @@
 import { tool } from "ai";
 import { z } from "zod";
 
+interface TavilySearchResult {
+  title: string;
+  url: string;
+  content: string;
+}
+
+interface TavilySearchResponse {
+  results: TavilySearchResult[];
+}
+
 export const webSearchTool = tool({
   description: "Search the web for current information on a topic. Returns a list of results with title, url, and snippet.",
   inputSchema: z.object({
@@ -27,8 +37,8 @@ export const webSearchTool = tool({
         };
       }
 
-      const data = await res.json();
-      const results = (data.results ?? []).map((r: any) => ({
+      const data: TavilySearchResponse = await res.json();
+      const results = (data.results ?? []).map((r) => ({
         title: r.title,
         url: r.url,
         snippet: r.content,
