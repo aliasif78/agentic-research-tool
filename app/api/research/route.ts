@@ -65,6 +65,8 @@ export async function POST(req: Request) {
   // with an unstated origin.
   const sessionId = crypto.randomUUID();
 
+  console.log(`[research:${sessionId}] request received, invoking model at ${new Date().toISOString()}`);
+
   // Every span produced inside this callback — webSearch/saveNote retry
   // attempts, model-call generations, fallback-trigger events — is tagged
   // with this sessionId, so the Langfuse dashboard groups an entire

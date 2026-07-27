@@ -56,6 +56,8 @@ export const webSearchTool = tool({
   description: "Search the web for current information on a topic. Returns a list of results with title, url, and snippet.",
   inputSchema: z.object({ query: z.string().min(1).describe("The search query") }),
   execute: async ({ query }) => {
+    console.log(`[webSearch] tool call started for "${query}" at ${new Date().toISOString()}`);
+
     return startActiveObservation("webSearch-tool-call", async (toolSpan) => {
       toolSpan.update({ input: { query }, metadata: { toolName: "webSearch" } });
 

@@ -44,6 +44,8 @@ export interface GenerateWithFallbackResult<T> {
  * fallback would fail identically since both models share one API key.
  */
 export async function generateWithFallback<T>(callModel: (modelId: ModelId) => Promise<T>): Promise<GenerateWithFallbackResult<T>> {
+  console.log(`[generateWithFallback] calling ${PRIMARY_MODEL} at ${new Date().toISOString()}`);
+
   try {
     const result = await callModel(PRIMARY_MODEL);
     return { result, modelUsed: PRIMARY_MODEL, fallbackTriggered: false, primaryError: null };
