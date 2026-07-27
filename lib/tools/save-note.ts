@@ -2,6 +2,27 @@
 import { tool } from "ai";
 import { z } from "zod";
 import { createSupabaseAdminClient } from "../supabase/admin-client";
+import { withRetry, type RetryClassification } from "@/lib/retry";
+
+export class SupabaseInsertError extends Error {}
+
+export function classifySupabaseError(err: unknown): RetryClassification {
+  // Supabase-js throws a raw TypeError for actual network failures (fetch
+  // itself couldn't reach the host) — that's transient, worth a retry.
+  if (err instanceof TypeError) return "retryable";
+
+  // Query-level errors come back as a return value, not a throw, so we
+  // normalize them into SupabaseInsertError below. Postgres SQLSTATE class
+  // 08 = connection exceptions — genuinely transient. Everything else
+  // (unique constraint violations, RLS/permission denial, bad column data)
+  // is a data or config problem that retrying will not fix.
+  if (err instanceof SupabaseInsertError) {
+    const isConnectionClassError = /fetch failed|network|ETIMEDOUT|ECONNRESET/i.test(err.message);
+    return isConnectionClassError ? "retryable" : "not-retryable";
+  }
+
+  return "not-retryable";
+}
 
 export const saveNoteTool = (sessionId: string) =>
   tool({
@@ -10,19 +31,36 @@ export const saveNoteTool = (sessionId: string) =>
       content: z.string().min(1).describe("The note content to save"),
     }),
     execute: async ({ content }) => {
-      try {
-        const supabase = createSupabaseAdminClient();
+      const supabase = createSupabaseAdminClient();
+
+      async function insertOnce() {
         const { data, error } = await supabase.from("research_notes").insert({ session_id: sessionId, content }).select("id").single();
 
         if (error) {
-          return { success: false as const, error: `Supabase insert failed: ${error.message}` };
+          throw new SupabaseInsertError(`Supabase insert failed: ${error.message} (code: ${error.code ?? "unknown"})`);
         }
+        return data;
+      }
 
-        return { success: true as const, noteId: data.id };
+      try {
+        const {
+          result: data,
+          attempts,
+          attemptLog,
+        } = await withRetry(insertOnce, {
+          maxAttempts: 3,
+          baseDelayMs: 400,
+          maxDelayMs: 3000,
+          classify: classifySupabaseError,
+        });
+
+        return { success: true as const, noteId: data.id, attempts, attemptLog };
       } catch (err) {
+        const attemptLog = (err as { attemptLog?: unknown }).attemptLog;
         return {
           success: false as const,
-          error: `Save note failed: ${err instanceof Error ? err.message : String(err)}`,
+          error: err instanceof Error ? err.message : String(err),
+          attemptLog,
         };
       }
     },

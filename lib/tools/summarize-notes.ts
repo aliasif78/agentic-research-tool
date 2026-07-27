@@ -33,6 +33,12 @@ export const summarizeNotesTool = (sessionId: string) =>
         const { text, usage } = await generateText({
           model: google("gemini-3.1-flash-lite"),
           abortSignal: combinedSignal,
+          maxRetries: 3, // AI SDK's built-in retryWithExponentialBackoff — do NOT
+          // add our own withRetry on top of this. It already
+          // classifies APICallError by statusCode (429/5xx retried,
+          // 4xx auth/validation not) and honors Retry-After headers.
+          // A second retry layer here would stack backoff delays
+          // and double-count attempts once tracing is added.
           prompt: `Condense the following research notes into a concise summary, preserving all key facts:\n\n${notesText}`,
         });
 
