@@ -148,10 +148,12 @@ export async function POST(req: Request) {
         ),
       );
 
+      const costNote = `Authoritative token and cost totals for this run — including the nested summarizeNotes LLM call — are tracked in Langfuse under sessionId ${sessionId}, not in this response. A partial outerUsage figure was previously exposed here and was incomplete by construction; removed rather than fixed a second time.`;
+
       if (doneCall) {
         const { summary } = doneCall.input as { summary: string };
         await flushLangfuse();
-        return NextResponse.json({ sessionId, summary, terminatedByDone: true, steps: result.steps.length, usage: outerUsage, modelUsed, fallbackTriggered });
+        return NextResponse.json({ sessionId, summary, terminatedByDone: true, steps: result.steps.length, costNote, modelUsed, fallbackTriggered });
       }
 
       // No `done` call. Two distinct causes — do not conflate them:
@@ -169,7 +171,7 @@ export async function POST(req: Request) {
           summary: result.text || null,
           terminatedByDone: false,
           steps: result.steps.length,
-          usage: outerUsage,
+          costNote,
           modelUsed,
           fallbackTriggered,
           warning: `The agent ended after ${result.steps.length} of ${MAX_STEPS} steps without calling done. This is a model compliance gap, not the step limit. ${result.text ? "Its final text response is included as summary, but it was not produced via the done tool and has not gone through your source-labeling or termination logic." : "No text response was produced either."}`,
@@ -183,7 +185,7 @@ export async function POST(req: Request) {
         summary: null,
         terminatedByDone: false,
         steps: result.steps.length,
-        usage: outerUsage,
+        costNote,
         modelUsed,
         fallbackTriggered,
         warning: `Reached the ${MAX_STEPS}-step limit before the agent called done. No final summary was produced. Partial findings may exist in research_notes for sessionId ${sessionId}.`,
