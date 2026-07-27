@@ -3,7 +3,11 @@ import { APICallError } from "ai";
 import { startObservation } from "@langfuse/tracing";
 
 export const PRIMARY_MODEL = "gemini-3.1-flash-lite";
-export const FALLBACK_MODEL = "gemini-2.5-flash";
+export const FALLBACK_MODEL = "gemini-3.5-flash"; // was gemini-3.5-flash — that model
+// returned "no longer available to
+// new users" when actually called;
+// discovered only by forcing a real
+// fallback trigger, not from docs.
 
 type ModelId = typeof PRIMARY_MODEL | typeof FALLBACK_MODEL;
 type ErrorClassification = "retryable" | "not-retryable";

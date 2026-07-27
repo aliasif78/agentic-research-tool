@@ -1,4 +1,5 @@
 // app/api/research/route.ts
+
 import { NextResponse } from "next/server";
 import { generateText, stepCountIs, hasToolCall } from "ai";
 import { google } from "@ai-sdk/google";
@@ -78,8 +79,8 @@ export async function POST(req: Request) {
     }> = [];
 
     try {
-      const { result, modelUsed, fallbackTriggered, primaryError } = await generateWithFallback((modelId) =>
-        generateText({
+      const { result, modelUsed, fallbackTriggered, primaryError } = await generateWithFallback((modelId) => {
+        return generateText({
           model: google(modelId),
           system: SYSTEM_PROMPT,
           prompt: `Research topic: ${topic}`,
@@ -111,11 +112,11 @@ export async function POST(req: Request) {
               ),
             );
           },
-        }),
-      );
+        });
+      });
 
       if (fallbackTriggered) {
-        console.warn(`[research:${sessionId}] primary model (gemini-3.1-flash-lite) failed, fell back to gemini-2.5-flash`, { primaryError });
+        console.warn(`[research:${sessionId}] primary model (gemini-3.1-flash-lite) failed, fell back to gemini-3.5-flash`, { primaryError });
       }
 
       const lastStep = result.steps[result.steps.length - 1];
