@@ -10,6 +10,11 @@
   },
   "dependencies": {
     "@ai-sdk/google": "^4.0.24",
+    "@langfuse/client": "^5.9.1",
+    "@langfuse/otel": "^5.9.1",
+    "@langfuse/tracing": "^5.9.1",
+    "@langfuse/vercel-ai-sdk": "^5.9.1",
+    "@opentelemetry/sdk-node": "^0.221.0",
     "@supabase/ssr": "^0.12.3",
     "@supabase/supabase-js": "^2.110.8",
     "ai": "^7.0.37",
