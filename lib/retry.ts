@@ -1,12 +1,13 @@
 // lib/retry.ts
 
 export type RetryClassification = "retryable" | "not-retryable";
+export type AttemptOutcome = "success" | RetryClassification;
 
 export interface RetryAttemptLog {
   attempt: number;
   delayMs: number;
-  classification: RetryClassification;
-  errorMessage: string;
+  classification: AttemptOutcome;
+  errorMessage: string | null;
 }
 
 export interface RetryResult<T> {
@@ -16,9 +17,9 @@ export interface RetryResult<T> {
 }
 
 interface RetryOptions {
-  maxAttempts: number; // total attempts, including the first — not "retries"
-  baseDelayMs: number; // e.g. 500
-  maxDelayMs: number; // cap on exponential growth, e.g. 8000
+  maxAttempts: number;
+  baseDelayMs: number;
+  maxDelayMs: number;
   classify: (err: unknown) => RetryClassification;
 }
 
@@ -35,14 +36,15 @@ function delayWithJitter(attempt: number, baseDelayMs: number, maxDelayMs: numbe
  */
 export async function withRetry<T>(fn: () => Promise<T>, options: RetryOptions): Promise<RetryResult<T>> {
   const attemptLog: RetryAttemptLog[] = [];
-  let lastErr: unknown;
 
   for (let attempt = 1; attempt <= options.maxAttempts; attempt++) {
     try {
       const result = await fn();
+      // Log the success too — omitting it left the attempt log incomplete,
+      // which would show up as a missing span once this feeds Langfuse.
+      attemptLog.push({ attempt, delayMs: 0, classification: "success", errorMessage: null });
       return { result, attempts: attempt, attemptLog };
     } catch (err) {
-      lastErr = err;
       const classification = options.classify(err);
       const errorMessage = err instanceof Error ? err.message : String(err);
 
@@ -57,6 +59,5 @@ export async function withRetry<T>(fn: () => Promise<T>, options: RetryOptions):
     }
   }
 
-  // Unreachable given maxAttempts >= 1, but keeps TypeScript happy.
-  throw lastErr;
+  throw new Error("unreachable: loop should always return or throw");
 }
