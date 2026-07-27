@@ -6,6 +6,7 @@ import { webSearchTool } from "@/lib/tools/web-search";
 import { saveNoteTool } from "@/lib/tools/save-note";
 import { summarizeNotesTool } from "@/lib/tools/summarize-notes";
 import { doneTool } from "@/lib/tools/done";
+import { generateWithFallback } from "@/lib/models/generate-with-fallback";
 
 // Multi-step agent loops can run long — don't let this silently inherit a
 // default Vercel function timeout shorter than a real 8-step run needs.
@@ -63,43 +64,34 @@ export async function POST(req: Request) {
   }> = [];
 
   try {
-    const result = await generateText({
-      model: google("gemini-3.1-flash-lite"),
-      system: SYSTEM_PROMPT,
-      maxRetries: 3, // AI SDK's built-in retryWithExponentialBackoff — do NOT
-      // add our own withRetry on top of this. It already
-      // classifies APICallError by statusCode (429/5xx retried,
-      // 4xx auth/validation not) and honors Retry-After headers.
-      // A second retry layer here would stack backoff delays
-      // and double-count attempts once tracing is added.
-      prompt: `Research topic: ${topic}`,
-      tools: {
-        webSearch: webSearchTool,
-        saveNote: saveNoteTool(sessionId),
-        summarizeNotes: summarizeNotesTool(sessionId),
-        done: doneTool,
-      },
-      // Stops on whichever condition fires first: hard step ceiling, or the
-      // model explicitly signaling completion via the `done` tool.
-      stopWhen: [stepCountIs(MAX_STEPS), hasToolCall("done")],
-      onStepFinish: ({ stepNumber, toolCalls, toolResults, usage }) => {
-        stepLog.push({ step: stepNumber, toolCalls, toolResults, usage });
-        // VERIFY: field name is `input` on tool calls in your installed
-        // version (v5+ renamed `args` -> `input`; confirm against .d.ts).
-        console.log(
-          `[research:${sessionId}] step ${stepNumber}`,
-          JSON.stringify(
-            {
-              toolCalls: toolCalls.map((c) => ({ name: c.toolName, input: c.input })),
-              toolResults,
-              usage,
-            },
-            null,
-            2,
-          ),
-        );
-      },
-    });
+    const { result, modelUsed, fallbackTriggered, primaryError } = await generateWithFallback((modelId) =>
+      generateText({
+        model: google(modelId),
+        system: SYSTEM_PROMPT,
+        prompt: `Research topic: ${topic}`,
+        maxRetries: 3, // AI SDK's own retryWithExponentialBackoff — exhausted
+        // before generateWithFallback ever sees an error.
+        tools: {
+          webSearch: webSearchTool,
+          saveNote: saveNoteTool(sessionId),
+          summarizeNotes: summarizeNotesTool(sessionId),
+          done: doneTool,
+        },
+        // Stops on whichever condition fires first: hard step ceiling, or the
+        // model explicitly signaling completion via the `done` tool.
+        stopWhen: [stepCountIs(MAX_STEPS), hasToolCall("done")],
+        onStepFinish: ({ stepNumber, toolCalls, toolResults, usage }) => {
+          stepLog.push({ step: stepNumber, toolCalls, toolResults, usage });
+          // VERIFY: field name is `input` on tool calls in your installed
+          // version (v5+ renamed `args` -> `input`; confirm against .d.ts).
+          console.log(`[research:${sessionId}] step ${stepNumber}`, JSON.stringify({ toolCalls: toolCalls.map((c) => ({ name: c.toolName, input: c.input })), toolResults, usage }, null, 2));
+        },
+      }),
+    );
+
+    if (fallbackTriggered) {
+      console.warn(`[research:${sessionId}] primary model (gemini-3.1-flash-lite) failed, fell back to gemini-2.5-flash`, { primaryError });
+    }
 
     const lastStep = result.steps[result.steps.length - 1];
     const doneCall = lastStep?.toolCalls?.find((c) => c.toolName === "done");
@@ -122,6 +114,8 @@ export async function POST(req: Request) {
         {
           steps: result.steps.length,
           terminatedByDone: Boolean(doneCall),
+          modelUsed,
+          fallbackTriggered,
           outerUsage, // NOTE: does not include nested summarizeNotes LLM calls — see below
         },
         null,
@@ -131,7 +125,7 @@ export async function POST(req: Request) {
 
     if (doneCall) {
       const { summary } = doneCall.input as { summary: string };
-      return NextResponse.json({ sessionId, summary, terminatedByDone: true, steps: result.steps.length, usage: outerUsage });
+      return NextResponse.json({ sessionId, summary, terminatedByDone: true, steps: result.steps.length, usage: outerUsage, modelUsed, fallbackTriggered });
     }
 
     // No `done` call. Two distinct causes — do not conflate them:
@@ -143,18 +137,41 @@ export async function POST(req: Request) {
       // ceiling event — the message must say so, and result.text (if any)
       // should be surfaced rather than discarded.
       console.warn(`[research:${sessionId}] model ended without calling done at step ${result.steps.length}/${MAX_STEPS} — instruction non-compliance, not a ceiling hit.`);
-      return NextResponse.json({ sessionId, summary: result.text || null, terminatedByDone: false, steps: result.steps.length, usage: outerUsage, warning: `The agent ended after ${result.steps.length} of ${MAX_STEPS} steps without calling done. This is a model compliance gap, not the step limit. ${result.text ? "Its final text response is included as summary, but it was not produced via the done tool and has not gone through your source-labeling or termination logic." : "No text response was produced either."}` });
+      return NextResponse.json({
+        sessionId,
+        summary: result.text || null,
+        terminatedByDone: false,
+        steps: result.steps.length,
+        usage: outerUsage,
+        modelUsed,
+        fallbackTriggered,
+        warning: `The agent ended after ${result.steps.length} of ${MAX_STEPS} steps without calling done. This is a model compliance gap, not the step limit. ${result.text ? "Its final text response is included as summary, but it was not produced via the done tool and has not gone through your source-labeling or termination logic." : "No text response was produced either."}`,
+      });
     }
 
     // Genuine ceiling hit.
-    return NextResponse.json({ sessionId, summary: null, terminatedByDone: false, steps: result.steps.length, usage: outerUsage, warning: `Reached the ${MAX_STEPS}-step limit before the agent called done. No final summary was produced. Partial findings may exist in research_notes for sessionId ${sessionId}.` });
+    return NextResponse.json({
+      sessionId,
+      summary: null,
+      terminatedByDone: false,
+      steps: result.steps.length,
+      usage: outerUsage,
+      modelUsed,
+      fallbackTriggered,
+      warning: `Reached the ${MAX_STEPS}-step limit before the agent called done. No final summary was produced. Partial findings may exist in research_notes for sessionId ${sessionId}.`,
+    });
   } catch (err) {
-    console.error(`[research:${sessionId}] run failed`, err);
+    const modelUsed = (err as { modelUsed?: string | null }).modelUsed ?? null;
+    const fallbackTriggered = (err as { fallbackTriggered?: boolean }).fallbackTriggered ?? false;
+
+    console.error(`[research:${sessionId}] run failed`, { modelUsed, fallbackTriggered, error: err });
     return NextResponse.json(
       {
         sessionId,
         error: "Research run failed before completion.",
         detail: err instanceof Error ? err.message : String(err),
+        modelUsed,
+        fallbackTriggered,
       },
       { status: 502 },
     );

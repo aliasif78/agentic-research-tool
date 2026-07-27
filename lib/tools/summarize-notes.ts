@@ -4,6 +4,7 @@ import { z } from "zod";
 import { generateText } from "ai";
 import { google } from "@ai-sdk/google";
 import { createSupabaseAdminClient } from "../supabase/admin-client";
+import { generateWithFallback } from "@/lib/models/generate-with-fallback";
 
 export const summarizeNotesTool = (sessionId: string) =>
   tool({
@@ -30,27 +31,37 @@ export const summarizeNotesTool = (sessionId: string) =>
       const combinedSignal = abortSignal ? AbortSignal.any([abortSignal, timeoutSignal]) : timeoutSignal;
 
       try {
-        const { text, usage } = await generateText({
-          model: google("gemini-3.1-flash-lite"),
-          abortSignal: combinedSignal,
-          maxRetries: 3, // AI SDK's built-in retryWithExponentialBackoff — do NOT
-          // add our own withRetry on top of this. It already
-          // classifies APICallError by statusCode (429/5xx retried,
-          // 4xx auth/validation not) and honors Retry-After headers.
-          // A second retry layer here would stack backoff delays
-          // and double-count attempts once tracing is added.
-          prompt: `Condense the following research notes into a concise summary, preserving all key facts:\n\n${notesText}`,
-        });
+        const {
+          result: genResult,
+          modelUsed,
+          fallbackTriggered,
+          primaryError,
+        } = await generateWithFallback((modelId) =>
+          generateText({
+            model: google(modelId),
+            abortSignal: combinedSignal,
+            maxRetries: 3, // AI SDK's own retryWithExponentialBackoff — exhausted
+            // before generateWithFallback ever sees an error.
+            prompt: `Condense the following research notes into a concise summary, preserving all key facts:\n\n${notesText}`,
+          }),
+        );
+
+        const { text, usage } = genResult;
 
         // Deliberately NOT returned in the tool result — the return value
         // gets fed back to the model as tool output. Token counts there
         // are wasted context and mean nothing to the model. Log it as a
         // side channel instead; this is your Phase 3 cost-accounting hook.
-        console.log("[summarizeNotesTool] nested LLM call:", { sessionId, model: "gemini-3.1-flash-lite", inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, totalTokens: usage.totalTokens });
+        console.log("[summarizeNotesTool] nested LLM call:", { sessionId, modelUsed, fallbackTriggered, primaryError, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, totalTokens: usage.totalTokens });
 
-        return { success: true as const, summary: text };
+        return { success: true as const, summary: text, modelUsed, fallbackTriggered };
       } catch (err) {
         const isTimeout = err instanceof Error && err.name === "TimeoutError";
+        const modelUsed = (err as { modelUsed?: string | null }).modelUsed ?? null;
+        const fallbackTriggered = (err as { fallbackTriggered?: boolean }).fallbackTriggered ?? false;
+
+        console.error("[summarizeNotesTool] both models failed:", { sessionId, modelUsed, fallbackTriggered, error: err instanceof Error ? err.message : String(err) });
+
         return {
           success: false as const,
           error: isTimeout ? "Summarization call timed out after 15s." : `Summarization call failed: ${err instanceof Error ? err.message : String(err)}`,
