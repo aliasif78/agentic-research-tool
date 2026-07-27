@@ -1,5 +1,6 @@
 // lib/models/generate-with-fallback.ts
 import { APICallError } from "ai";
+import { startObservation } from "@langfuse/tracing";
 
 export const PRIMARY_MODEL = "gemini-3.1-flash-lite";
 export const FALLBACK_MODEL = "gemini-2.5-flash";
@@ -47,17 +48,26 @@ export async function generateWithFallback<T>(callModel: (modelId: ModelId) => P
     const primaryError = err instanceof Error ? err.message : String(err);
 
     if (classification === "not-retryable") {
-      throw Object.assign(err instanceof Error ? err : new Error(primaryError), {
-        modelUsed: PRIMARY_MODEL,
-        fallbackTriggered: false,
-      });
+      throw Object.assign(err instanceof Error ? err : new Error(primaryError), { modelUsed: PRIMARY_MODEL, fallbackTriggered: false });
     }
+
+    // Fallback attempts get their own traced event — this is the one that
+    // matters most for the client-facing "how reliable is this" story:
+    // a Langfuse dashboard filter on this event name shows exactly how
+    // often the primary model degrades in production.
+    const fallbackSpan = startObservation("model-fallback-triggered", {
+      input: { primaryModel: PRIMARY_MODEL, fallbackModel: FALLBACK_MODEL, primaryError },
+    });
 
     try {
       const result = await callModel(FALLBACK_MODEL);
+      fallbackSpan.update({ output: { fallbackSucceeded: true } });
+      fallbackSpan.end();
       return { result, modelUsed: FALLBACK_MODEL, fallbackTriggered: true, primaryError };
     } catch (fallbackErr) {
       const fallbackMessage = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
+      fallbackSpan.update({ output: { fallbackSucceeded: false, fallbackError: fallbackMessage }, level: "ERROR" });
+      fallbackSpan.end();
       throw Object.assign(new Error(`Both models failed. Primary (${PRIMARY_MODEL}): ${primaryError}. Fallback (${FALLBACK_MODEL}): ${fallbackMessage}`), {
         modelUsed: null,
         fallbackTriggered: true,

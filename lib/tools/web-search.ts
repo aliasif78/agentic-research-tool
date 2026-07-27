@@ -1,6 +1,7 @@
 // lib/tools/web-search.ts
 import { tool } from "ai";
 import { z } from "zod";
+import { startActiveObservation } from "@langfuse/tracing";
 import { withRetry, type RetryClassification } from "@/lib/retry";
 
 interface TavilySearchResult {
@@ -53,36 +54,46 @@ async function callTavily(query: string): Promise<TavilySearchResponse> {
 
 export const webSearchTool = tool({
   description: "Search the web for current information on a topic. Returns a list of results with title, url, and snippet.",
-  inputSchema: z.object({
-    query: z.string().min(1).describe("The search query"),
-  }),
+  inputSchema: z.object({ query: z.string().min(1).describe("The search query") }),
   execute: async ({ query }) => {
-    try {
-      const {
-        result: data,
-        attempts,
-        attemptLog,
-      } = await withRetry(() => callTavily(query), {
-        maxAttempts: 3,
-        baseDelayMs: 500,
-        maxDelayMs: 4000,
-        classify: classifyTavilyError,
-      });
+    return startActiveObservation("webSearch-tool-call", async (toolSpan) => {
+      toolSpan.update({ input: { query }, metadata: { toolName: "webSearch" } });
 
-      const results = (data.results ?? []).map((r) => ({ title: r.title, url: r.url, snippet: r.content }));
+      try {
+        const {
+          result: data,
+          attempts,
+          attemptLog,
+        } = await withRetry(() => callTavily(query), {
+          maxAttempts: 3,
+          baseDelayMs: 500,
+          maxDelayMs: 4000,
+          classify: classifyTavilyError,
+          onAttempt: (log) => {
+            const attemptSpan = toolSpan.startObservation(`webSearch-attempt-${log.attempt}`, {
+              input: { query, attemptNumber: log.attempt },
+              metadata: { classification: log.classification },
+            });
+            attemptSpan.update({ output: { errorMessage: log.errorMessage, delayMs: log.delayMs } });
+            attemptSpan.end();
+          },
+        });
 
-      if (results.length === 0) {
-        return { success: false as const, error: "No search results found for this query.", attempts, attemptLog };
+        const results = (data.results ?? []).map((r) => ({ title: r.title, url: r.url, snippet: r.content }));
+
+        if (results.length === 0) {
+          toolSpan.update({ output: { success: false, error: "No results" }, level: "WARNING" });
+          return { success: false as const, error: "No search results found for this query.", attempts, attemptLog };
+        }
+
+        toolSpan.update({ output: { success: true, resultCount: results.length, attempts } });
+        return { success: true as const, results, attempts, attemptLog };
+      } catch (err) {
+        const attemptLog = (err as { attemptLog?: unknown }).attemptLog;
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        toolSpan.update({ output: { success: false, error: errorMessage }, level: "ERROR" });
+        return { success: false as const, error: errorMessage, attemptLog };
       }
-
-      return { success: true as const, results, attempts, attemptLog };
-    } catch (err) {
-      const attemptLog = (err as { attemptLog?: unknown }).attemptLog;
-      return {
-        success: false as const,
-        error: err instanceof Error ? err.message : String(err),
-        attemptLog,
-      };
-    }
+    });
   },
 });

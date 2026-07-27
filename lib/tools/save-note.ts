@@ -1,6 +1,7 @@
 // lib/tools/save-note.ts
 import { tool } from "ai";
 import { z } from "zod";
+import { startActiveObservation } from "@langfuse/tracing";
 import { createSupabaseAdminClient } from "../supabase/admin-client";
 import { withRetry, type RetryClassification } from "@/lib/retry";
 
@@ -31,37 +32,47 @@ export const saveNoteTool = (sessionId: string) =>
       content: z.string().min(1).describe("The note content to save"),
     }),
     execute: async ({ content }) => {
-      const supabase = createSupabaseAdminClient();
+      return startActiveObservation("saveNote-tool-call", async (toolSpan) => {
+        toolSpan.update({ input: { content }, metadata: { toolName: "saveNote", sessionId } });
 
-      async function insertOnce() {
-        const { data, error } = await supabase.from("research_notes").insert({ session_id: sessionId, content }).select("id").single();
+        const supabase = createSupabaseAdminClient();
 
-        if (error) {
-          throw new SupabaseInsertError(`Supabase insert failed: ${error.message} (code: ${error.code ?? "unknown"})`);
+        async function insertOnce() {
+          const { data, error } = await supabase.from("research_notes").insert({ session_id: sessionId, content }).select("id").single();
+          if (error) {
+            throw new SupabaseInsertError(`Supabase insert failed: ${error.message} (code: ${error.code ?? "unknown"})`);
+          }
+          return data;
         }
-        return data;
-      }
 
-      try {
-        const {
-          result: data,
-          attempts,
-          attemptLog,
-        } = await withRetry(insertOnce, {
-          maxAttempts: 3,
-          baseDelayMs: 400,
-          maxDelayMs: 3000,
-          classify: classifySupabaseError,
-        });
+        try {
+          const {
+            result: data,
+            attempts,
+            attemptLog,
+          } = await withRetry(insertOnce, {
+            maxAttempts: 3,
+            baseDelayMs: 400,
+            maxDelayMs: 3000,
+            classify: classifySupabaseError,
+            onAttempt: (log) => {
+              const attemptSpan = toolSpan.startObservation(`saveNote-attempt-${log.attempt}`, {
+                input: { attemptNumber: log.attempt },
+                metadata: { classification: log.classification },
+              });
+              attemptSpan.update({ output: { errorMessage: log.errorMessage, delayMs: log.delayMs } });
+              attemptSpan.end();
+            },
+          });
 
-        return { success: true as const, noteId: data.id, attempts, attemptLog };
-      } catch (err) {
-        const attemptLog = (err as { attemptLog?: unknown }).attemptLog;
-        return {
-          success: false as const,
-          error: err instanceof Error ? err.message : String(err),
-          attemptLog,
-        };
-      }
+          toolSpan.update({ output: { success: true, noteId: data.id, attempts } });
+          return { success: true as const, noteId: data.id, attempts, attemptLog };
+        } catch (err) {
+          const attemptLog = (err as { attemptLog?: unknown }).attemptLog;
+          const errorMessage = err instanceof Error ? err.message : String(err);
+          toolSpan.update({ output: { success: false, error: errorMessage }, level: "ERROR" });
+          return { success: false as const, error: errorMessage, attemptLog };
+        }
+      });
     },
   });

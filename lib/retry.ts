@@ -21,6 +21,7 @@ interface RetryOptions {
   baseDelayMs: number;
   maxDelayMs: number;
   classify: (err: unknown) => RetryClassification;
+  onAttempt?: (log: RetryAttemptLog) => void; // caller-supplied tracing hook — retry.ts stays agnostic to whatever observability tool is wired in
 }
 
 function delayWithJitter(attempt: number, baseDelayMs: number, maxDelayMs: number): number {
@@ -40,21 +41,25 @@ export async function withRetry<T>(fn: () => Promise<T>, options: RetryOptions):
   for (let attempt = 1; attempt <= options.maxAttempts; attempt++) {
     try {
       const result = await fn();
-      // Log the success too — omitting it left the attempt log incomplete,
-      // which would show up as a missing span once this feeds Langfuse.
-      attemptLog.push({ attempt, delayMs: 0, classification: "success", errorMessage: null });
+      const log: RetryAttemptLog = { attempt, delayMs: 0, classification: "success", errorMessage: null };
+      attemptLog.push(log);
+      options.onAttempt?.(log);
       return { result, attempts: attempt, attemptLog };
     } catch (err) {
       const classification = options.classify(err);
       const errorMessage = err instanceof Error ? err.message : String(err);
 
       if (classification === "not-retryable" || attempt === options.maxAttempts) {
-        attemptLog.push({ attempt, delayMs: 0, classification, errorMessage });
+        const log: RetryAttemptLog = { attempt, delayMs: 0, classification, errorMessage };
+        attemptLog.push(log);
+        options.onAttempt?.(log);
         throw Object.assign(err instanceof Error ? err : new Error(errorMessage), { attemptLog });
       }
 
       const delayMs = delayWithJitter(attempt, options.baseDelayMs, options.maxDelayMs);
-      attemptLog.push({ attempt, delayMs, classification, errorMessage });
+      const log: RetryAttemptLog = { attempt, delayMs, classification, errorMessage };
+      attemptLog.push(log);
+      options.onAttempt?.(log);
       await new Promise((res) => setTimeout(res, delayMs));
     }
   }
