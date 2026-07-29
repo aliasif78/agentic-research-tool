@@ -32,7 +32,15 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className={`${spaceGrotesk.variable} ${plexSans.variable} ${plexMono.variable} h-full antialiased`}>
-      <body className="flex min-h-full flex-col bg-ink text-text font-body" suppressHydrationWarning>
+      <body className="relative flex min-h-full flex-col overflow-x-hidden bg-ink text-text font-body" suppressHydrationWarning>
+        <div
+          aria-hidden
+          className="pointer-events-none fixed inset-0 -z-10 opacity-40"
+          style={{
+            background: "radial-gradient(600px circle at 20% 20%, color-mix(in srgb, var(--color-signal) 18%, transparent), transparent 60%), radial-gradient(500px circle at 80% 70%, color-mix(in srgb, var(--color-checkpoint) 16%, transparent), transparent 60%)",
+            animation: "ambient-drift 18s ease-in-out infinite",
+          }}
+        />
         {children}
       </body>
     </html>

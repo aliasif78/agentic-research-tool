@@ -44,10 +44,10 @@ export default function Home() {
 
   return (
     <main className="flex flex-1 items-center justify-center px-6">
-      <div className="w-full max-w-lg">
+      <div className="w-full max-w-lg animate-[fade-slide-up_0.5s_ease-out]">
         <div className="mb-10">
           <p className="font-mono text-xs uppercase tracking-[0.2em] text-muted">Research Agent</p>
-          <h1 className="mt-3 font-display text-3xl font-medium tracking-tight text-text sm:text-4xl">Start a durable run.</h1>
+          <h1 className="gradient-text mt-3 font-display text-3xl font-medium tracking-tight sm:text-4xl">Start a durable run.</h1>
           <p className="mt-3 text-sm leading-relaxed text-muted">The agent searches, saves findings, and pauses once to check in with you before it finishes. Close this tab any time — the run keeps going without you.</p>
         </div>
 
@@ -62,7 +62,7 @@ export default function Home() {
 
           {error && <p className="mt-3 text-sm text-danger">{error}</p>}
 
-          <button type="submit" disabled={submitting} className="mt-5 w-full rounded-md bg-signal px-4 py-2.5 font-display text-sm font-medium text-ink transition-opacity hover:opacity-90 disabled:opacity-50">
+          <button type="submit" disabled={submitting} className="mt-5 w-full cursor-pointer rounded-md bg-signal px-4 py-2.5 font-display text-sm font-medium text-ink transition-all hover:opacity-90 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50">
             {submitting ? "Starting…" : "Start run"}
           </button>
         </form>
