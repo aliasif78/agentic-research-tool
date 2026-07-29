@@ -9,6 +9,7 @@ import { saveNoteTool } from "@/lib/tools/save-note";
 import { summarizeNotesTool } from "@/lib/tools/summarize-notes";
 import { doneTool } from "@/lib/tools/done";
 import { generateWithFallback } from "@/lib/models/generate-with-fallback";
+import { createSupabaseAdminClient } from "@/lib/supabase/admin-client";
 
 // Multi-step agent loops can run long — don't let this silently inherit a
 // default Vercel function timeout shorter than a real 8-step run needs.
@@ -57,13 +58,15 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Missing required field: topic." }, { status: 400 });
   }
 
-  // Generated server-side, never accepted from the client. Nothing here
-  // lets a caller supply an arbitrary sessionId to read or write another
-  // session's notes via the admin client. This is NOT multi-tenant auth
-  // (that's Week 9 / capstone) — it just closes the "guess someone else's
-  // session id" gap that existed when sessionId was purely a closure param
-  // with an unstated origin.
-  const sessionId = crypto.randomUUID();
+  // near the top of POST(), replacing the bare crypto.randomUUID() line:
+  const supabase = createSupabaseAdminClient();
+  const { data: runRow, error: runError } = await supabase.from("research_runs").insert({ topic, status: "running" }).select("id").single();
+
+  if (runError || !runRow) {
+    return NextResponse.json({ error: "Failed to create research run." }, { status: 500 });
+  }
+
+  const sessionId = runRow.id; // kept as `sessionId` here only to minimize the diff on a route being replaced in Phase 5 — rename to runId if you'd rather be consistent now.
 
   console.log(`[research:${sessionId}] request received, invoking model at ${new Date().toISOString()}`);
 
