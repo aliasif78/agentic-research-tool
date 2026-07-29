@@ -69,8 +69,11 @@ export const researchAgent = inngest.createFunction(
 
     let messages: ModelMessage[] = [{ role: "user", content: `Research topic: ${topic}` }];
     let stepCount = 0;
+
     let hasSearched = false;
     let hasSavedNote = false;
+    let hasPaused = false; // guards the checkpoint from re-firing if a later turn re-satisfies hasSearched && hasSavedNote
+
     let finalSummary: string | null = null;
     let terminatedByDone = false;
     let terminationReason: TerminationReason | null = null;
@@ -183,13 +186,55 @@ export const researchAgent = inngest.createFunction(
         toolResultParts.push({ type: "tool-result", toolCallId: toolCall.toolCallId, toolName: toolCall.toolName, output: { type: "json", value: output } });
       }
 
-      // TODO Phase 4: once hasSearched && hasSavedNote are both true and a
-      // pause hasn't already fired, insert the human-in-the-loop checkpoint
-      // here — mark status 'awaiting_human_input', then step.waitForEvent
-      // with a 10-minute timeout, abandoning cleanly on timeout.
-
+      // Build and append this turn's tool-result message BEFORE the
+      // human-in-loop gate. If the gate's add-context branch appended a
+      // new user message first, it would wedge a user message between an
+      // assistant tool-call and its result — exactly the ordering that
+      // produced AI_MissingToolResultsError on pass 3. Tool-result
+      // messages must immediately follow their tool-call, with nothing
+      // injected in between.
       const toolMessage = { role: "tool", content: toolResultParts } as unknown as ModelMessage;
       messages = [...messages, toolMessage];
+
+      if (hasSearched && hasSavedNote && !hasPaused) {
+        hasPaused = true;
+
+        await step.run("mark-awaiting-input", () => updateRunStatus(runId, { status: "awaiting_human_input" }));
+
+        const humanInput = await step.waitForEvent("wait-for-human-input", {
+          event: "research/human-input",
+          match: "data.runId",
+          timeout: "10m",
+        });
+
+        if (humanInput === null) {
+          await step.run("mark-abandoned", () =>
+            updateRunStatus(runId, {
+              status: "abandoned",
+              warning: `No human response was received within 10 minutes. The run was abandoned before summarization/completion. Partial findings may exist in research_notes for run_id ${runId}.`,
+            }),
+          );
+          return {
+            runId,
+            stepCount,
+            terminatedByDone: false,
+            finalSummary: null,
+            hasSearched,
+            hasSavedNote,
+            terminationReason: "abandoned" as const,
+          };
+        }
+
+        const { decision, extraContext } = humanInput.data as { decision: "continue" | "add-context"; extraContext?: string };
+
+        await step.run("mark-resumed", () => updateRunStatus(runId, { status: "running" }));
+
+        if (decision === "add-context" && extraContext) {
+          messages = [...messages, { role: "user", content: extraContext }];
+        }
+        // decision === "continue" -> no message change, loop just resumes.
+      }
+
       stepCount++;
     }
 
