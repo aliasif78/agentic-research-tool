@@ -135,3 +135,10 @@ npx tsx scripts/test-fallback.ts            # generateWithFallback: synthetic 42
 npx tsx scripts/test-tools.ts               # all four tools, real happy-path + real invalid-key check
 npx tsx scripts/measure-done-compliance.ts  # N real sequential requests, tabulates done-compliance under forced total search failure (requires dev server running, and the synthetic outage temporarily added to web-search.ts — see git history / PR notes for exact placement)
 ```
+
+## Frontend
+
+`/` — submit a topic, redirects to `/runs/[runId]`.
+`/runs/[runId]` — polls `GET /api/research/[runId]` every 2s (plain interval polling — no SSE/websockets; out of scope for this exercise's scale). Shows the human checkpoint's Continue/Add-context controls when `awaiting_human_input`, disables them on submission, and renders `done`/`failed`/`abandoned` as distinct plain states — `abandoned` is a real, expected outcome (no response within the 10-minute wait window), not an error condition.
+
+**No auth, no session management.** The `runId` in the URL is the only access control — same unguessable-server-generated-UUID pattern as the rest of this project. Anyone with the URL can view status and resume the run. This is acceptable for this exercise's scope; it is not a substitute for real authorization and would need one before any multi-user deployment.
