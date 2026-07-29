@@ -1,5 +1,4 @@
 // lib/tools/summarize-notes.ts
-import { tool } from "ai";
 import { z } from "zod";
 import { generateText } from "ai";
 import { google } from "@ai-sdk/google";
@@ -8,58 +7,50 @@ import { generateWithFallback } from "@/lib/models/generate-with-fallback";
 
 export const summarizeNotesInputSchema = z.object({});
 
-export const summarizeNotesTool = (runId: string) =>
-  tool({
-    description: "Retrieve all saved notes for this research session and condense them into a summary.",
-    inputSchema: summarizeNotesInputSchema,
-    execute: async (_input, { abortSignal }) => {
-      const supabase = createSupabaseAdminClient();
-      const { data, error } = await supabase.from("research_notes").select("content").eq("run_id", runId).order("created_at", { ascending: true });
+export interface SummarizeNotesSuccess {
+  summary: string;
+  modelUsed: string;
+  fallbackTriggered: boolean;
+}
 
-      if (error) {
-        return { success: false as const, error: `Failed to retrieve notes: ${error.message}` };
-      }
+/**
+ * Pure function, extracted from the deleted AI-SDK tool() wrapper — same
+ * pattern already applied to insertNote() in save-note.ts. NOT yet called
+ * from research-agent.ts; Phase 3 left summarizeNotes as a stub there.
+ * Wiring this in (DB read and the nested generateText call each as their
+ * own Inngest step.run()) is a separate, not-yet-scoped increment. This is
+ * real, working logic carried over intact — not new work invented during
+ * this cleanup pass.
+ *
+ * Returns a discriminated result for the "no notes / no data" business
+ * case (not an exception — same convention as callTavily's "no results"
+ * case). A genuine system failure (both models down in generateWithFallback,
+ * or a Supabase read error) throws, for the caller to classify the same
+ * way webSearch/saveNote's step bodies already do.
+ */
+export async function summarizeAllNotes({ runId, abortSignal }: { runId: string; abortSignal?: AbortSignal }): Promise<{ success: true; result: SummarizeNotesSuccess } | { success: false; error: string }> {
+  const supabase = createSupabaseAdminClient();
+  const { data, error } = await supabase.from("research_notes").select("content").eq("run_id", runId).order("created_at", { ascending: true });
 
-      if (!data || data.length === 0) {
-        return { success: false as const, error: "No notes have been saved yet for this session." };
-      }
+  if (error) return { success: false, error: `Failed to retrieve notes: ${error.message}` };
+  if (!data || data.length === 0) return { success: false, error: "No notes have been saved yet for this session." };
 
-      const notesText = data.map((n, i) => `${i + 1}. ${n.content}`).join("\n");
+  const notesText = data.map((n, i) => `${i + 1}. ${n.content}`).join("\n");
+  const timeoutSignal = AbortSignal.timeout(15_000);
+  const combinedSignal = abortSignal ? AbortSignal.any([abortSignal, timeoutSignal]) : timeoutSignal;
 
-      // Combine the outer run's abort signal (if the caller forwarded one)
-      // with a hard local ceiling, so this nested call can't hang even if
-      // route.ts never wires up abortSignal on the outer generateText call.
-      const timeoutSignal = AbortSignal.timeout(15_000);
-      const combinedSignal = abortSignal ? AbortSignal.any([abortSignal, timeoutSignal]) : timeoutSignal;
+  const {
+    result: genResult,
+    modelUsed,
+    fallbackTriggered,
+  } = await generateWithFallback((modelId) =>
+    generateText({
+      model: google(modelId),
+      abortSignal: combinedSignal,
+      maxRetries: 3,
+      prompt: `Condense the following research notes into a concise summary, preserving all key facts:\n\n${notesText}`,
+    }),
+  );
 
-      try {
-        const {
-          result: genResult,
-          modelUsed,
-          fallbackTriggered,
-          primaryError,
-        } = await generateWithFallback((modelId) =>
-          generateText({
-            model: google(modelId),
-            abortSignal: combinedSignal,
-            maxRetries: 3,
-            prompt: `Condense the following research notes into a concise summary, preserving all key facts:\n\n${notesText}`,
-          }),
-        );
-
-        const { text, usage } = genResult;
-        console.log("[summarizeNotesTool] nested LLM call:", { runId, modelUsed, fallbackTriggered, primaryError, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, totalTokens: usage.totalTokens });
-
-        return { success: true as const, summary: text, modelUsed, fallbackTriggered };
-      } catch (err) {
-        const isTimeout = err instanceof Error && err.name === "TimeoutError";
-        const modelUsed = (err as { modelUsed?: string | null }).modelUsed ?? null;
-        const fallbackTriggered = (err as { fallbackTriggered?: boolean }).fallbackTriggered ?? false;
-        console.error("[summarizeNotesTool] both models failed:", { runId, modelUsed, fallbackTriggered, error: err instanceof Error ? err.message : String(err) });
-        return {
-          success: false as const,
-          error: isTimeout ? "Summarization call timed out after 15s." : `Summarization call failed: ${err instanceof Error ? err.message : String(err)}`,
-        };
-      }
-    },
-  });
+  return { success: true, result: { summary: genResult.text, modelUsed, fallbackTriggered } };
+}

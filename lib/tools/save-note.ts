@@ -1,7 +1,5 @@
 // lib/tools/save-note.ts
-import { tool } from "ai";
 import { z } from "zod";
-import { startActiveObservation } from "@langfuse/tracing";
 import { createSupabaseAdminClient } from "../supabase/admin-client";
 
 export const saveNoteInputSchema = z.object({ content: z.string().min(1).describe("The note content to save") });
@@ -47,33 +45,3 @@ export async function insertNote({ runId, noteId, content }: { runId: string; no
   }
   return data;
 }
-
-/**
- * LEGACY AI-SDK tool wrapper. Used only by the old synchronous route
- * (app/api/research/route.ts) and ad-hoc scripts, which rely on the AI
- * SDK's own automatic tool-execution loop rather than Inngest steps.
- * Generates its own id per call — NOT idempotent against retries. This is
- * an accepted, already-documented gap (see Week 8 README's fallback-chain
- * "duplicate notes" caveat), not a new regression. Slated for deletion
- * once Phase 5 replaces route.ts with the Inngest-triggered API.
- */
-export const saveNoteTool = (runId: string) =>
-  tool({
-    description: "Save a key finding or piece of information to persistent storage for this research session.",
-    inputSchema: saveNoteInputSchema,
-    execute: async ({ content }) => {
-      return startActiveObservation("saveNote-tool-call", async (toolSpan) => {
-        toolSpan.update({ input: { content }, metadata: { toolName: "saveNote", runId } });
-        try {
-          const noteId = crypto.randomUUID();
-          const data = await insertNote({ runId, noteId, content });
-          toolSpan.update({ output: { success: true, noteId: data.id } });
-          return { success: true as const, noteId: data.id };
-        } catch (err) {
-          const errorMessage = err instanceof Error ? err.message : String(err);
-          toolSpan.update({ output: { success: false, error: errorMessage }, level: "ERROR" });
-          return { success: false as const, error: errorMessage };
-        }
-      });
-    },
-  });
