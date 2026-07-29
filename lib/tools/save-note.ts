@@ -4,6 +4,8 @@ import { z } from "zod";
 import { startActiveObservation } from "@langfuse/tracing";
 import { createSupabaseAdminClient } from "../supabase/admin-client";
 
+export const saveNoteInputSchema = z.object({ content: z.string().min(1).describe("The note content to save") });
+
 export class SupabaseInsertError extends Error {}
 
 // Retained for Phase 3: Inngest's own step retry needs this classification
@@ -58,9 +60,7 @@ export async function insertNote({ runId, noteId, content }: { runId: string; no
 export const saveNoteTool = (runId: string) =>
   tool({
     description: "Save a key finding or piece of information to persistent storage for this research session.",
-    inputSchema: z.object({
-      content: z.string().min(1).describe("The note content to save"),
-    }),
+    inputSchema: saveNoteInputSchema,
     execute: async ({ content }) => {
       return startActiveObservation("saveNote-tool-call", async (toolSpan) => {
         toolSpan.update({ input: { content }, metadata: { toolName: "saveNote", runId } });

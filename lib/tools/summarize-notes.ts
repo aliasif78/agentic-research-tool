@@ -6,10 +6,12 @@ import { google } from "@ai-sdk/google";
 import { createSupabaseAdminClient } from "../supabase/admin-client";
 import { generateWithFallback } from "@/lib/models/generate-with-fallback";
 
+export const summarizeNotesInputSchema = z.object({});
+
 export const summarizeNotesTool = (runId: string) =>
   tool({
     description: "Retrieve all saved notes for this research session and condense them into a summary.",
-    inputSchema: z.object({}),
+    inputSchema: summarizeNotesInputSchema,
     execute: async (_input, { abortSignal }) => {
       const supabase = createSupabaseAdminClient();
       const { data, error } = await supabase.from("research_notes").select("content").eq("run_id", runId).order("created_at", { ascending: true });

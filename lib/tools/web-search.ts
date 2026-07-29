@@ -3,6 +3,8 @@ import { tool } from "ai";
 import { z } from "zod";
 import { startActiveObservation } from "@langfuse/tracing";
 
+export const webSearchInputSchema = z.object({ query: z.string().min(1).describe("The search query") });
+
 interface TavilySearchResult {
   title: string;
   url: string;
@@ -65,7 +67,7 @@ export async function callTavily(query: string): Promise<TavilySearchResponse> {
  */
 export const webSearchTool = tool({
   description: "Search the web for current information on a topic. Returns a list of results with title, url, and snippet.",
-  inputSchema: z.object({ query: z.string().min(1).describe("The search query") }),
+  inputSchema: webSearchInputSchema,
   execute: async ({ query }) => {
     console.log(`[webSearch] tool call started for "${query}" at ${new Date().toISOString()}`);
 
