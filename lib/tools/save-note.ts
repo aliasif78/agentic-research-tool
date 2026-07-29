@@ -3,13 +3,16 @@ import { tool } from "ai";
 import { z } from "zod";
 import { startActiveObservation } from "@langfuse/tracing";
 import { createSupabaseAdminClient } from "../supabase/admin-client";
-import { withRetry, type RetryClassification } from "@/lib/retry";
 
 export class SupabaseInsertError extends Error {}
 
-export function classifySupabaseError(err: unknown): RetryClassification {
-  // Supabase-js throws a raw TypeError for actual network failures (fetch
-  // itself couldn't reach the host) — that's transient, worth a retry.
+// Retained for Phase 3: Inngest's own step retry needs this classification
+// to decide whether to throw NonRetriableError (401/403/permission/data
+// errors — retrying won't fix them) or let a plain throw happen so
+// Inngest's built-in backoff retries the step (connection-class errors).
+// withRetry itself is gone — Inngest now owns all retry/backoff — but the
+// classification logic underneath it is still needed.
+export function classifySupabaseError(err: unknown): "retryable" | "not-retryable" {
   if (err instanceof TypeError) return "retryable";
 
   // Query-level errors come back as a return value, not a throw, so we
@@ -25,7 +28,34 @@ export function classifySupabaseError(err: unknown): RetryClassification {
   return "not-retryable";
 }
 
-export const saveNoteTool = (sessionId: string) =>
+/**
+ * Idempotent note upsert. This is the function Phase 3's Inngest
+ * orchestrator calls directly inside its own step.run(), with a noteId
+ * generated in a separate, prior step.run() — so if THIS step retries
+ * (transient Supabase connection failure), it reuses the same noteId and
+ * upserts onto the same row instead of generating a new one and
+ * duplicating the note.
+ */
+export async function insertNote({ runId, noteId, content }: { runId: string; noteId: string; content: string }) {
+  const supabase = createSupabaseAdminClient();
+  const { data, error } = await supabase.from("research_notes").upsert({ id: noteId, run_id: runId, content }, { onConflict: "id" }).select("id").single();
+
+  if (error) {
+    throw new SupabaseInsertError(`Supabase upsert failed: ${error.message} (code: ${error.code ?? "unknown"})`);
+  }
+  return data;
+}
+
+/**
+ * LEGACY AI-SDK tool wrapper. Used only by the old synchronous route
+ * (app/api/research/route.ts) and ad-hoc scripts, which rely on the AI
+ * SDK's own automatic tool-execution loop rather than Inngest steps.
+ * Generates its own id per call — NOT idempotent against retries. This is
+ * an accepted, already-documented gap (see Week 8 README's fallback-chain
+ * "duplicate notes" caveat), not a new regression. Slated for deletion
+ * once Phase 5 replaces route.ts with the Inngest-triggered API.
+ */
+export const saveNoteTool = (runId: string) =>
   tool({
     description: "Save a key finding or piece of information to persistent storage for this research session.",
     inputSchema: z.object({
@@ -33,45 +63,16 @@ export const saveNoteTool = (sessionId: string) =>
     }),
     execute: async ({ content }) => {
       return startActiveObservation("saveNote-tool-call", async (toolSpan) => {
-        toolSpan.update({ input: { content }, metadata: { toolName: "saveNote", sessionId } });
-
-        const supabase = createSupabaseAdminClient();
-
-        async function insertOnce() {
-          const { data, error } = await supabase.from("research_notes").insert({ session_id: sessionId, content }).select("id").single();
-          if (error) {
-            throw new SupabaseInsertError(`Supabase insert failed: ${error.message} (code: ${error.code ?? "unknown"})`);
-          }
-          return data;
-        }
-
+        toolSpan.update({ input: { content }, metadata: { toolName: "saveNote", runId } });
         try {
-          const {
-            result: data,
-            attempts,
-            attemptLog,
-          } = await withRetry(insertOnce, {
-            maxAttempts: 3,
-            baseDelayMs: 400,
-            maxDelayMs: 3000,
-            classify: classifySupabaseError,
-            onAttempt: (log) => {
-              const attemptSpan = toolSpan.startObservation(`saveNote-attempt-${log.attempt}`, {
-                input: { attemptNumber: log.attempt },
-                metadata: { classification: log.classification },
-              });
-              attemptSpan.update({ output: { errorMessage: log.errorMessage, delayMs: log.delayMs } });
-              attemptSpan.end();
-            },
-          });
-
-          toolSpan.update({ output: { success: true, noteId: data.id, attempts } });
-          return { success: true as const, noteId: data.id, attempts, attemptLog };
+          const noteId = crypto.randomUUID();
+          const data = await insertNote({ runId, noteId, content });
+          toolSpan.update({ output: { success: true, noteId: data.id } });
+          return { success: true as const, noteId: data.id };
         } catch (err) {
-          const attemptLog = (err as { attemptLog?: unknown }).attemptLog;
           const errorMessage = err instanceof Error ? err.message : String(err);
           toolSpan.update({ output: { success: false, error: errorMessage }, level: "ERROR" });
-          return { success: false as const, error: errorMessage, attemptLog };
+          return { success: false as const, error: errorMessage };
         }
       });
     },

@@ -2,7 +2,6 @@
 import { tool } from "ai";
 import { z } from "zod";
 import { startActiveObservation } from "@langfuse/tracing";
-import { withRetry, type RetryClassification } from "@/lib/retry";
 
 interface TavilySearchResult {
   title: string;
@@ -14,7 +13,7 @@ interface TavilySearchResponse {
   results: TavilySearchResult[];
 }
 
-class TavilyHttpError extends Error {
+export class TavilyHttpError extends Error {
   constructor(
     public status: number,
     body: string,
@@ -23,20 +22,24 @@ class TavilyHttpError extends Error {
   }
 }
 
-function classifyTavilyError(err: unknown): RetryClassification {
+// Retained for Phase 3: Inngest's step retry needs this classification to
+// decide whether to throw NonRetriableError (401/403/400 — retrying won't
+// fix a bad key or malformed request) or let a plain throw happen so
+// Inngest's own backoff retries the step (429/5xx/timeout/network).
+export function classifyTavilyError(err: unknown): "retryable" | "not-retryable" {
   if (err instanceof TavilyHttpError) {
     // 401/403 = bad key, 400 = malformed request — retrying won't fix either.
     // 429/500/502/503/504 = transient, worth another attempt.
     if ([401, 403, 400].includes(err.status)) return "not-retryable";
     if ([429, 500, 502, 503, 504].includes(err.status)) return "retryable";
-    return "not-retryable"; // unknown status: fail closed, don't assume retryable
+    return "not-retryable";
   }
   if (err instanceof DOMException && err.name === "TimeoutError") return "retryable";
-  if (err instanceof TypeError) return "retryable"; // fetch network failure
+  if (err instanceof TypeError) return "retryable";
   return "not-retryable";
 }
 
-async function callTavily(query: string): Promise<TavilySearchResponse> {
+export async function callTavily(query: string): Promise<TavilySearchResponse> {
   const res = await fetch("https://api.tavily.com/search", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -52,6 +55,14 @@ async function callTavily(query: string): Promise<TavilySearchResponse> {
   return res.json();
 }
 
+/**
+ * LEGACY AI-SDK tool wrapper — single attempt, no retry. withRetry was
+ * removed in Phase 2: Inngest now owns all retry/backoff for tool-level
+ * side effects (Phase 3). This wrapper exists only for the old
+ * synchronous route and ad-hoc scripts, which have no step-based retry —
+ * a transient failure here fails the tool call once. Slated for deletion
+ * once Phase 5 replaces route.ts.
+ */
 export const webSearchTool = tool({
   description: "Search the web for current information on a topic. Returns a list of results with title, url, and snippet.",
   inputSchema: z.object({ query: z.string().min(1).describe("The search query") }),
@@ -62,39 +73,20 @@ export const webSearchTool = tool({
       toolSpan.update({ input: { query }, metadata: { toolName: "webSearch" } });
 
       try {
-        const {
-          result: data,
-          attempts,
-          attemptLog,
-        } = await withRetry(() => callTavily(query), {
-          maxAttempts: 3,
-          baseDelayMs: 500,
-          maxDelayMs: 4000,
-          classify: classifyTavilyError,
-          onAttempt: (log) => {
-            const attemptSpan = toolSpan.startObservation(`webSearch-attempt-${log.attempt}`, {
-              input: { query, attemptNumber: log.attempt },
-              metadata: { classification: log.classification },
-            });
-            attemptSpan.update({ output: { errorMessage: log.errorMessage, delayMs: log.delayMs } });
-            attemptSpan.end();
-          },
-        });
-
+        const data = await callTavily(query);
         const results = (data.results ?? []).map((r) => ({ title: r.title, url: r.url, snippet: r.content }));
 
         if (results.length === 0) {
           toolSpan.update({ output: { success: false, error: "No results" }, level: "WARNING" });
-          return { success: false as const, error: "No search results found for this query.", attempts, attemptLog };
+          return { success: false as const, error: "No search results found for this query." };
         }
 
-        toolSpan.update({ output: { success: true, resultCount: results.length, attempts } });
-        return { success: true as const, results, attempts, attemptLog };
+        toolSpan.update({ output: { success: true, resultCount: results.length } });
+        return { success: true as const, results };
       } catch (err) {
-        const attemptLog = (err as { attemptLog?: unknown }).attemptLog;
         const errorMessage = err instanceof Error ? err.message : String(err);
         toolSpan.update({ output: { success: false, error: errorMessage }, level: "ERROR" });
-        return { success: false as const, error: errorMessage, attemptLog };
+        return { success: false as const, error: errorMessage };
       }
     });
   },
